@@ -1,0 +1,25 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/tienda_ropa
+    username: tienda_user
+    password: super_seguro
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+    show-sql: true
+
+server:
+  port: 8080
+
+alegra:
+  base-url: https://api.alegra.com/api/v1
+  email: ${ALEGRA_EMAIL}
+  token: ${ALEGRA_TOKEN}
+
+bold:
+  base-url: https://api.bold.co
+  api-key: ${BOLD_API_KEY}
+  webhook-secret: ${BOLD_WEBHOOK_SECRET}
