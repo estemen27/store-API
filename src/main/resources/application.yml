@@ -22,4 +22,6 @@ alegra:
 bold:
   base-url: https://api.bold.co
   api-key: ${BOLD_API_KEY}
+  identity-key: ${BOLD_IDENTITY_KEY}
+  integrity-secret: ${BOLD_INTEGRITY_SECRET}
   webhook-secret: ${BOLD_WEBHOOK_SECRET}

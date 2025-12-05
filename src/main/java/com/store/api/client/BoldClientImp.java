@@ -7,15 +7,12 @@ import com.store.api.repository.OrderRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.ParameterizedTypeReference;
-import org.springframework.http.HttpStatusCode; // Importante
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
 
-import java.math.BigDecimal;
-import java.util.HashMap;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -25,116 +22,91 @@ public class BoldClientImp implements BoldClient {
 
     private static final Logger log = LoggerFactory.getLogger(BoldClientImp.class);
 
-    private final WebClient webClient;
     private final OrderRepository orderRepository;
+    private final String integritySecret;
+    private final String identityKey; // La que va en el HTML data-api-key
 
-    // Suprimimos la advertencia ya que planeas usarlo a futuro
-    @SuppressWarnings("unused")
-    private final String webhookSecret;
-
-    public BoldClientImp(WebClient.Builder webClientBuilder,
-                         OrderRepository orderRepository,
-                         @Value("${bold.base-url}") String baseUrl,
-                         @Value("${bold.api-key}") String apiKey,
-                         @Value("${bold.webhook-secret:}") String webhookSecret) {
-
+    public BoldClientImp(OrderRepository orderRepository,
+                         @Value("${bold.integrity-secret:}") String integritySecret,
+                         @Value("${bold.identity-key:}") String identityKey) {
         this.orderRepository = orderRepository;
-        this.webhookSecret = webhookSecret;
-
-        this.webClient = webClientBuilder
-                .baseUrl(baseUrl)
-                .defaultHeaders(headers -> headers.setBearerAuth(apiKey))
-                .build();
+        this.integritySecret = integritySecret;
+        this.identityKey = identityKey;
     }
 
     @Override
-    public String createPaymentLink(Order order) {
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("amount", toMinorUnits(order.getTotalAmount()));
-        payload.put("currency", order.getCurrency());
-        payload.put("description", "Compra tienda de ropa - " + order.getOrderNumber());
-        payload.put("reference", order.getPublicId().toString());
+    public String getIdentityKey() {
+        return this.identityKey;
+    }
 
-        Map<String, Object> customer = new HashMap<>();
-        customer.put("name", order.getCustomerName());
-        customer.put("email", order.getCustomerEmail());
-        customer.put("phone", order.getCustomerPhone());
-        payload.put("customer", customer);
+    // --- LÓGICA EXACTA PROPORCIONADA POR BOLD ---
+    @Override
+    public String calculateIntegritySignature(Order order) {
+        // 1. Obtener datos exactos
+        String identificador = order.getPublicId().toString();
+        // Usamos toPlainString() para que BigDecimal no salga como 1.5E4
+        String monto = order.getTotalAmount().toPlainString();
+        String divisa = "COP"; // O order.getCurrency() si lo tienes dinámico
+        String llaveSecreta = this.integritySecret;
 
-        Map<String, Object> response = webClient.post()
-                .uri("/online/link/v1")
-                .bodyValue(payload)
-                .retrieve()
-                // Corrección de tipos con Mono.<Throwable>error
-                .onStatus(HttpStatusCode::is4xxClientError, res ->
-                        res.bodyToMono(String.class).flatMap(body ->
-                                Mono.<Throwable>error(new IllegalStateException("Error 4xx from Bold: " + body))))
-                .onStatus(HttpStatusCode::is5xxServerError, res ->
-                        res.bodyToMono(String.class).flatMap(body ->
-                                Mono.<Throwable>error(new IllegalStateException("Error 5xx from Bold: " + body))))
-                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                .block();
+        // 2. Concatenar: {Identificador}{Monto}{Divisa}{LlaveSecreta}
+        String cadenaConcatenada = identificador + monto + divisa + llaveSecreta;
 
-        if (response == null) {
-            throw new IllegalStateException("Empty response from Bold when creating payment link");
+        log.info("Generando Hash para cadena: {}{}{}{HIDDEN}", identificador, monto, divisa);
+
+        try {
+            // 3. Convertir a bytes UTF-8
+            byte[] encodedText = cadenaConcatenada.getBytes(StandardCharsets.UTF_8);
+
+            // 4. Crear MessageDigest SHA-256
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+
+            // 5. Generar el hash
+            byte[] hashBuffer = digest.digest(encodedText);
+
+            // 6. Convertir a Hexadecimal (Código exacto de Bold)
+            StringBuilder hashHex = new StringBuilder();
+            for (byte b : hashBuffer) {
+                hashHex.append(String.format("%02x", b));
+            }
+
+            return hashHex.toString();
+
+        } catch (NoSuchAlgorithmException e) {
+            log.error("Error generando hash SHA-256", e);
+            throw new RuntimeException("Error en algoritmo de encriptación Bold", e);
         }
-
-        Object urlObj = response.get("url");
-        if (urlObj == null) {
-            log.warn("Bold response without url field: {}", response);
-            throw new IllegalStateException("Bold did not return a payment URL");
-        }
-        return urlObj.toString();
     }
 
     @Override
     public void processWebhook(Map<String, Object> payload) {
-        log.info("Received webhook from Bold: {}", payload);
-
+        // Lógica de webhook que ya tenías funcionando
+        log.info("Webhook payload: {}", payload);
         String reference = (String) payload.get("reference");
-        if (reference == null) {
-            log.warn("Webhook without reference, cannot match order");
-            return;
-        }
 
-        UUID orderPublicId;
+        if (reference == null) return;
+
+        // Intentar obtener status desde diferentes campos posibles según versión API
+        String status = (String) payload.get("paymentStatus");
+        if (status == null) status = (String) payload.get("status");
+
+        UUID orderId;
         try {
-            orderPublicId = UUID.fromString(reference);
-        } catch (IllegalArgumentException e) {
-            log.warn("Invalid reference UUID in webhook: {}", reference);
-            return;
+            orderId = UUID.fromString(reference);
+        } catch (Exception e) { return; }
+
+        Optional<Order> orderOpt = orderRepository.findByPublicId(orderId);
+        if (orderOpt.isPresent()) {
+            Order order = orderOpt.get();
+            if (status != null) {
+                switch (status.toUpperCase()) {
+                    case "APPROVED", "PAID" -> order.setStatus(OrderStatus.PAID);
+                    case "REJECTED", "FAILED", "DECLINED" -> order.setStatus(OrderStatus.FAILED);
+                }
+            }
+            String txId = (String) payload.get("paymentId");
+            if (txId != null) order.setBoldPaymentId(txId);
+            orderRepository.save(order);
         }
-
-        String status = (String) payload.get("status");
-        String paymentId = (String) payload.get("paymentId");
-
-        Optional<Order> optionalOrder = orderRepository.findByPublicId(orderPublicId);
-        if (optionalOrder.isEmpty()) {
-            throw new ResourceNotFoundException("Order not found for reference " + reference);
-        }
-
-        Order order = optionalOrder.get();
-
-        if (status == null) {
-            log.warn("Webhook without status for order {}", reference);
-            return;
-        }
-
-        switch (status.toUpperCase()) {
-            case "APPROVED", "PAID" -> order.setStatus(OrderStatus.PAID);
-            case "DECLINED", "REJECTED" -> order.setStatus(OrderStatus.FAILED);
-            case "EXPIRED" -> order.setStatus(OrderStatus.FAILED);
-            default -> log.info("Unhandled Bold status '{}' for order {}", status, reference);
-        }
-
-        if (paymentId != null) {
-            order.setBoldPaymentId(paymentId);
-        }
-
-        orderRepository.save(order);
-    }
-
-    private long toMinorUnits(BigDecimal amount) {
-        return amount.longValue();
     }
 }

@@ -4,16 +4,14 @@ import com.store.api.client.BoldClient;
 import com.store.api.dto.CreateOrderItemRequestDTO;
 import com.store.api.dto.CreateOrderRequestDTO;
 import com.store.api.dto.CreateOrderResponseDTO;
-import com.store.api.dto.OrderItemResponseDTO;
 import com.store.api.dto.OrderResponseDTO;
+import com.store.api.dto.OrderItemResponseDTO;
 import com.store.api.dto.ProductDTO;
 import com.store.api.exception.ResourceNotFoundException;
 import com.store.api.model.Order;
 import com.store.api.model.OrderItem;
 import com.store.api.model.OrderStatus;
 import com.store.api.repository.OrderRepository;
-import com.store.api.service.OrderService;
-import com.store.api.service.ProductService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -40,64 +38,77 @@ public class OrderServiceImpl implements OrderService {
     @Override
     @Transactional
     public CreateOrderResponseDTO createOrder(CreateOrderRequestDTO request) {
-
-        // 1. Crear entidad Order con datos del cliente y envío
+        // 1. Construir la orden y asignar TODOS los datos del cliente
         Order order = new Order();
         order.setCustomerName(request.getCustomerName());
         order.setCustomerEmail(request.getCustomerEmail());
         order.setCustomerPhone(request.getCustomerPhone());
+
+        // --- AQUÍ ESTABA EL ERROR: Asignación explícita de la dirección ---
         order.setShippingAddressLine1(request.getShippingAddressLine1());
         order.setShippingAddressLine2(request.getShippingAddressLine2());
         order.setShippingCity(request.getShippingCity());
         order.setShippingDepartment(request.getShippingDepartment());
         order.setShippingCountry(request.getShippingCountry());
+        // ------------------------------------------------------------------
+
         order.setCurrency("COP");
         order.setStatus(OrderStatus.PENDING_PAYMENT);
 
-        // 2. Construir items y calcular total
+        // 2. Calcular Totales y crear Items
         BigDecimal total = BigDecimal.ZERO;
+
+        // Inicializamos la lista de items si es necesario (aunque JPA suele manejarlo, es buena práctica)
+        if (order.getItems() == null) {
+            order.setItems(new java.util.ArrayList<>());
+        }
 
         for (CreateOrderItemRequestDTO itemReq : request.getItems()) {
             ProductDTO product = productService.getProductById(itemReq.getProductId());
 
-            BigDecimal subtotal = product.getPrice()
-                    .multiply(BigDecimal.valueOf(itemReq.getQuantity()));
+            // Protección contra precios nulos
+            BigDecimal price = product.getPrice() != null ? product.getPrice() : BigDecimal.ZERO;
+            BigDecimal subtotal = price.multiply(BigDecimal.valueOf(itemReq.getQuantity()));
 
             OrderItem orderItem = new OrderItem();
             orderItem.setOrder(order);
             orderItem.setProductId(product.getId());
             orderItem.setProductName(product.getName());
+            orderItem.setUnitPrice(price);
+            orderItem.setQuantity(itemReq.getQuantity());
+            orderItem.setSubtotal(subtotal);
+
+            // Datos visuales del item
             orderItem.setSize(itemReq.getSize());
             orderItem.setColor(itemReq.getColor());
             orderItem.setImageUrl(product.getImageUrl());
-            orderItem.setUnitPrice(product.getPrice());
-            orderItem.setQuantity(itemReq.getQuantity());
-            orderItem.setSubtotal(subtotal);
 
             order.getItems().add(orderItem);
             total = total.add(subtotal);
         }
 
         order.setTotalAmount(total);
-
-        // 3. Generar número de orden (antes del link de pago)
         order.setOrderNumber(generateOrderNumber());
 
-        // 4. Generar link de pago en Bold usando la orden (ya con publicId y orderNumber)
-        String paymentLink = boldClient.createPaymentLink(order);
-        order.setPaymentLink(paymentLink);
+        // 3. GUARDAR (Genera el UUID y persiste en BD)
+        Order savedOrder = orderRepository.save(order);
 
-        // 5. Guardar en BD
-        Order saved = orderRepository.save(order);
+        // 4. GENERAR FIRMA BOLD (Integrity Signature)
+        String signature = boldClient.calculateIntegritySignature(savedOrder);
 
-        // 6. Construir respuesta
+        // 5. Construir Respuesta para el Frontend
         CreateOrderResponseDTO response = new CreateOrderResponseDTO();
-        response.setOrderId(saved.getPublicId());
-        response.setOrderNumber(saved.getOrderNumber());
-        response.setTotalAmount(saved.getTotalAmount());
-        response.setCurrency(saved.getCurrency());
-        response.setPaymentLink(saved.getPaymentLink());
-        response.setStatus(saved.getStatus());
+        response.setOrderId(savedOrder.getPublicId());
+        response.setOrderNumber(savedOrder.getOrderNumber());
+        response.setTotalAmount(savedOrder.getTotalAmount());
+        response.setCurrency(savedOrder.getCurrency());
+        response.setStatus(savedOrder.getStatus());
+
+        // Datos específicos para el botón de Bold
+        response.setBoldIntegritySignature(signature);
+        response.setBoldIdentityKey(boldClient.getIdentityKey());
+        // URL de retorno (puedes ajustarla a tu frontend real luego)
+        response.setBoldRedirectionUrl("http://localhost:8080/api/orders/" + savedOrder.getPublicId());
 
         return response;
     }
@@ -114,11 +125,14 @@ public class OrderServiceImpl implements OrderService {
         dto.setCustomerName(order.getCustomerName());
         dto.setCustomerEmail(order.getCustomerEmail());
         dto.setCustomerPhone(order.getCustomerPhone());
+
+        // Mapeo completo de dirección
         dto.setShippingAddressLine1(order.getShippingAddressLine1());
         dto.setShippingAddressLine2(order.getShippingAddressLine2());
         dto.setShippingCity(order.getShippingCity());
         dto.setShippingDepartment(order.getShippingDepartment());
         dto.setShippingCountry(order.getShippingCountry());
+
         dto.setTotalAmount(order.getTotalAmount());
         dto.setCurrency(order.getCurrency());
         dto.setPaymentLink(order.getPaymentLink());
@@ -149,7 +163,6 @@ public class OrderServiceImpl implements OrderService {
     }
 
     private static String generateOrderNumber() {
-        // Implementación simple; luego puedes hacer algo más bonito/secuencial
         return "ORD-" + System.currentTimeMillis();
     }
 }

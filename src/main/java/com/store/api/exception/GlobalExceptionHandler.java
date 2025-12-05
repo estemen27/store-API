@@ -1,6 +1,5 @@
 package com.store.api.exception;
 
-
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -45,9 +44,16 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> handleGeneric(Exception ex) {
+        // Imprimir error en consola para depuración
+        ex.printStackTrace();
+
         Map<String, Object> body = new HashMap<>();
         body.put("error", "INTERNAL_SERVER_ERROR");
-        body.put("message", "Unexpected error");
+        body.put("message", ex.getMessage());
+        // Agregamos el primer elemento del stacktrace para saber dónde falló
+        if (ex.getStackTrace().length > 0) {
+            body.put("trace", ex.getStackTrace()[0].toString());
+        }
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(body);
     }
 }

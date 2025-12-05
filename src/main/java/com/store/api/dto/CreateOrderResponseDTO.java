@@ -2,7 +2,6 @@ package com.store.api.dto;
 
 import com.store.api.model.OrderStatus;
 import lombok.Data;
-
 import java.math.BigDecimal;
 import java.util.UUID;
 
@@ -13,6 +12,9 @@ public class CreateOrderResponseDTO {
     private String orderNumber;
     private BigDecimal totalAmount;
     private String currency;
-    private String paymentLink;
     private OrderStatus status;
+
+    private String boldIntegritySignature;
+    private String boldIdentityKey;
+    private String boldRedirectionUrl;
 }
